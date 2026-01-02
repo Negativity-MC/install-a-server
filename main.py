@@ -4,6 +4,7 @@ import subprocess
 import requests
 import platform
 import shutil
+import json
 from rich.console import Console
 from rich.progress import Progress
 from rich.panel import Panel
@@ -104,7 +105,103 @@ def check_java():
         console.print("[bold red]Java executable not found. Please install Java.[/bold red]")
         return False
 
-def create_start_script(jar_name, ram=None):
+def get_modrinth_version(slug, mc_version):
+    """Fetch the latest compatible version of a plugin from Modrinth."""
+    url = f"https://api.modrinth.com/v2/project/{slug}/version"
+    
+    loaders = json.dumps(["paper", "purpur", "spigot", "bukkit"])
+    game_versions = json.dumps([mc_version])
+    
+    params = {
+        "loaders": loaders,
+        "game_versions": game_versions
+    }
+    
+    try:
+        response = requests.get(url, params=params)
+        response.raise_for_status()
+        versions = response.json()
+        if versions:
+            return versions[0] # Return the first (latest) compatible version
+        return None
+    except requests.RequestException:
+        return None
+
+def install_plugins(mc_version):
+    """Offer to install plugins."""
+    console.print(Panel("Plugin Quickstart", style="bold cyan"))
+    
+    plugins = {
+        "Chunky": "chunky",
+        "ViaVersion": "viaversion",
+        "ViaBackwards": "viabackwards",
+        "LuckPerms": "luckperms",
+        "TAB": "tab"
+    }
+    
+    choices = []
+    valid_plugins = {}
+    
+    console.print("[dim]Checking plugin compatibility...[/dim]")
+    
+    # Check compatibility for all plugins
+    for name, slug in plugins.items():
+        ver = get_modrinth_version(slug, mc_version)
+        if ver:
+            valid_plugins[name] = (slug, ver)
+            choices.append(name)
+        else:
+            console.print(f"[dim]No compatible version found for {name}[/dim]")
+
+    if not choices:
+        console.print("[yellow]No compatible plugins found for this version.[/yellow]")
+        return
+
+    questions = [
+        inquirer.Checkbox(
+            "plugins",
+            message="Select plugins to install (Space to select/deselect, Enter to confirm)",
+            choices=choices,
+            default=choices 
+        )
+    ]
+    
+    answers = inquirer.prompt(questions)
+    if not answers: return
+    
+    selected_names = answers["plugins"]
+    
+    if not selected_names:
+        console.print("[yellow]No plugins selected.[/yellow]")
+        return
+
+    if not os.path.exists("plugins"):
+        os.makedirs("plugins")
+
+    for name in selected_names:
+        slug, ver_data = valid_plugins[name]
+        files = ver_data.get("files", [])
+        primary_file = next((f for f in files if f.get("primary")), files[0] if files else None)
+        
+        if primary_file:
+            download_url = primary_file["url"]
+            filename = primary_file["filename"]
+            
+            console.print(f"Downloading [bold]{name}[/bold]...")
+            try:
+                r = requests.get(download_url)
+                r.raise_for_status()
+                with open(os.path.join("plugins", filename), "wb") as f:
+                    f.write(r.content)
+                console.print(f"[green]Installed {filename}[/green]")
+            except requests.RequestException as e:
+                console.print(f"[red]Failed to download {name}: {e}[/red]")
+        else:
+            console.print(f"[red]Could not find file for {name}[/red]")
+    
+    console.print("[bold green]Plugin installation complete![/bold green]")
+
+def create_start_script(jar_name, ram):
     """Create a start.sh script with Aikar's flags."""
     content = "#!/bin/sh\n" + AIKARS_FLAGS.format(ram=ram, jar_name=jar_name)
     
@@ -200,14 +297,19 @@ def main():
             return
     else:
         console.print("[dim]eula.txt already exists.[/dim]")
+    
+    # 6. Install Plugins (New Step)
+    plugin_q = [inquirer.Confirm("plugins", message="Do you want to check for quickstart plugins?", default=True)]
+    if inquirer.prompt(plugin_q)["plugins"]:
+        install_plugins(selected_version)
 
-    # 6. Check Java
+    # 7. Check Java
     check_q = [inquirer.Confirm("check_java", message="Check Java Runtime?", default=True)]
     if inquirer.prompt(check_q)["check_java"]:
         if not check_java():
             console.print("[yellow]Warning: Java check failed. Server might not start.[/yellow]")
 
-    # 7. Create Start Script
+    # 8. Create Start Script
     script_created = False
     ram_allocated = None
     
@@ -220,7 +322,7 @@ def main():
             if create_start_script(jar_file, ram_allocated):
                 script_created = True
 
-    # 8. Start Server
+    # 9. Start Server
     start_q = [inquirer.Confirm("start", message="Start the server now?", default=True)]
     if inquirer.prompt(start_q)["start"]:
         start_server(jar_file, ram=ram_allocated, use_script=script_created)
